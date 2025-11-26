@@ -1,0 +1,5 @@
+{
+  "name": "T20 Agent Architect",
+  "description": "A browser-based multi-agent workflow system. Define goals, generate execution plans using Gemini, edit workflows, and execute tasks with AI agents producing persistent artifacts.",
+  "requestFramePermissions": []
+}
