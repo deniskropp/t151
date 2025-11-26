@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useAppStore } from '../store';
 import { Artifact, File } from '../types';
-import { FileText, Code, Download, ChevronRight, ChevronDown, Folder, FolderOpen, Package, Archive } from 'lucide-react';
+import { FileText, Code, Download, ChevronRight, ChevronDown, Folder, FolderOpen, Package, Archive, Layers, List } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import JSZip from 'jszip';
 
@@ -23,7 +23,9 @@ interface DirNode {
 
 type TreeNode = FileNode | DirNode;
 
-const buildFileTree = (files: File[], artifactId: string): Record<string, TreeNode> => {
+type FileWithMeta = File & { sourceArtifactId: string };
+
+const buildFileTree = (files: FileWithMeta[]): Record<string, TreeNode> => {
   const root: Record<string, TreeNode> = {};
 
   files.forEach(file => {
@@ -39,7 +41,7 @@ const buildFileTree = (files: File[], artifactId: string): Record<string, TreeNo
           name: part,
           path: file.path,
           content: file.content,
-          artifactId
+          artifactId: file.sourceArtifactId
         };
       } else {
         if (!currentLevel[part]) {
@@ -132,14 +134,13 @@ const TreeItem: React.FC<{
 export const ArtifactViewer: React.FC = () => {
   const { artifacts } = useAppStore();
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null);
+  const [viewMode, setViewMode] = useState<'task' | 'combined'>('combined');
 
   // Auto-select first file if nothing selected
   React.useEffect(() => {
     if (!selectedFile && artifacts.length > 0 && artifacts[0].files.length > 0) {
       const firstArtifact = artifacts[0];
       const firstFile = firstArtifact.files[0];
-      // We assume simple path structure for default selection, or just let user select.
-      // But to be safe, let's just construct a node for it.
       setSelectedFile({
           type: 'file',
           name: firstFile.path.split('/').pop() || firstFile.path,
@@ -163,30 +164,57 @@ export const ArtifactViewer: React.FC = () => {
   const downloadAllZip = async () => {
     const zip = new JSZip();
     
-    artifacts.forEach(artifact => {
-        // Create a folder for each task to organize files
-        const folderName = `Task_${artifact.taskId}_${artifact.id.slice(0, 4)}`;
-        const folder = zip.folder(folderName);
-        
-        if (folder) {
-            artifact.files.forEach(file => {
-                 folder.file(file.path, file.content);
+    if (viewMode === 'combined') {
+        // Flat project structure (latest versions)
+        const fileMap = new Map<string, string>();
+        artifacts.forEach(art => {
+            art.files.forEach(f => {
+                fileMap.set(f.path, f.content);
             });
-        }
-    });
+        });
+        
+        fileMap.forEach((content, path) => {
+            zip.file(path, content);
+        });
+        
+    } else {
+        // Grouped by task
+        artifacts.forEach(artifact => {
+            const folderName = `Task_${artifact.taskId}_${artifact.id.slice(0, 4)}`;
+            const folder = zip.folder(folderName);
+            
+            if (folder) {
+                artifact.files.forEach(file => {
+                     folder.file(file.path, file.content);
+                });
+            }
+        });
+    }
 
     try {
         const content = await zip.generateAsync({ type: "blob" });
         const url = URL.createObjectURL(content);
         const a = document.createElement('a');
         a.href = url;
-        a.download = "Project_Artifacts.zip";
+        a.download = viewMode === 'combined' ? "Project_Source.zip" : "Artifacts_By_Task.zip";
         a.click();
         URL.revokeObjectURL(url);
     } catch (e) {
         console.error("Failed to generate zip", e);
         alert("Failed to generate ZIP file.");
     }
+  };
+
+  const getCombinedFiles = () => {
+    const fileMap = new Map<string, FileWithMeta>();
+    // Artifacts are strictly ordered by time in the store (append only)
+    // So later artifacts naturally overwrite earlier ones for the same path
+    artifacts.forEach(art => {
+        art.files.forEach(f => {
+            fileMap.set(f.path, { ...f, sourceArtifactId: art.id });
+        });
+    });
+    return Array.from(fileMap.values());
   };
 
   if (artifacts.length === 0) {
@@ -199,52 +227,82 @@ export const ArtifactViewer: React.FC = () => {
     );
   }
 
+  const renderTreeContent = (tree: Record<string, TreeNode>) => {
+      return Object.values(tree)
+        .sort((a, b) => {
+            if (a.type === 'dir' && b.type === 'file') return -1;
+            if (a.type === 'file' && b.type === 'dir') return 1;
+            return a.name.localeCompare(b.name);
+        })
+        .map(node => (
+            <TreeItem 
+            key={node.name} 
+            node={node} 
+            level={0} 
+            onSelect={setSelectedFile} 
+            selectedFile={selectedFile} 
+            />
+        ));
+  };
+
   return (
     <div className="flex h-full border-t border-slate-800">
       {/* Sidebar: File Tree */}
       <div className="w-80 border-r border-slate-800 bg-slate-900/50 flex flex-col flex-shrink-0">
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-           <h3 className="font-semibold text-slate-300 flex items-center gap-2">
-             <Package size={18} />
+        <div className="p-3 border-b border-slate-800 flex items-center justify-between">
+           <h3 className="font-semibold text-slate-300 flex items-center gap-2 text-sm">
+             <Package size={16} />
              Explorer
            </h3>
-           <button 
-             onClick={downloadAllZip}
-             title="Download All as ZIP"
-             className="text-slate-400 hover:text-white hover:bg-slate-700 p-2 rounded transition-colors"
-           >
-             <Archive size={18} />
-           </button>
+           <div className="flex items-center gap-2">
+                <div className="flex items-center bg-slate-800 rounded-lg p-0.5 border border-slate-700">
+                    <button 
+                        onClick={() => setViewMode('task')}
+                        className={`p-1.5 rounded transition-all ${viewMode === 'task' ? 'bg-slate-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}
+                        title="Group by Task"
+                    >
+                        <List size={14} />
+                    </button>
+                    <button 
+                        onClick={() => setViewMode('combined')}
+                        className={`p-1.5 rounded transition-all ${viewMode === 'combined' ? 'bg-slate-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700/50'}`}
+                        title="Combined Project View"
+                    >
+                        <Layers size={14} />
+                    </button>
+                </div>
+                <div className="w-px h-4 bg-slate-700"></div>
+                <button 
+                    onClick={downloadAllZip}
+                    title="Download as ZIP"
+                    className="text-slate-400 hover:text-white hover:bg-slate-700 p-1.5 rounded transition-colors"
+                >
+                    <Archive size={16} />
+                </button>
+           </div>
         </div>
         
         <div className="flex-1 overflow-y-auto p-2">
-          {artifacts.map(art => {
-             const tree = buildFileTree(art.files, art.id);
-             return (
-               <div key={art.id} className="mb-4">
-                  <div className="px-2 py-1 text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-2">
-                    <span>Task: {art.taskId}</span>
-                  </div>
-                  <div className="pl-1">
-                      {Object.values(tree)
-                        .sort((a, b) => {
-                             if (a.type === 'dir' && b.type === 'file') return -1;
-                             if (a.type === 'file' && b.type === 'dir') return 1;
-                             return a.name.localeCompare(b.name);
-                        })
-                        .map(node => (
-                          <TreeItem 
-                            key={node.name} 
-                            node={node} 
-                            level={0} 
-                            onSelect={setSelectedFile} 
-                            selectedFile={selectedFile} 
-                          />
-                      ))}
-                  </div>
-               </div>
-             )
-          })}
+          {viewMode === 'task' ? (
+              artifacts.map(art => {
+                const filesWithMeta = art.files.map(f => ({...f, sourceArtifactId: art.id}));
+                const tree = buildFileTree(filesWithMeta);
+                return (
+                    <div key={art.id} className="mb-4">
+                        <div className="px-2 py-1 text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 flex items-center gap-2">
+                            <span>Task: {art.taskId}</span>
+                        </div>
+                        <div className="pl-1">
+                            {renderTreeContent(tree)}
+                        </div>
+                    </div>
+                )
+              })
+          ) : (
+             <div className="mt-2 pl-1">
+                 {renderTreeContent(buildFileTree(getCombinedFiles()))}
+             </div>
+          )}
         </div>
       </div>
 
